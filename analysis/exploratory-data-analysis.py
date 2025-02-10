@@ -4,7 +4,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 
 # load a parquet file
-df = pd.read_parquet('bulk_data/registration/2024/primary_voterregistration_2024_primary_precinct.parquet')
+df = pd.read_parquet('bulk_data/returns/2015/municipal_ElectionReturns_2015_Municipal_Precinct.parquet')
 
 # print the first 5 rows of the dataframe
 print(df.columns)

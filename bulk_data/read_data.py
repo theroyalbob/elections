@@ -353,46 +353,69 @@ def read_file_content(response, filename):
         # Determine if this is a registration or returns file
         is_registration = 'registration' in filename.lower() or 'vrstat' in filename.lower()
         columns = registration_columns if is_registration else returns_columns
+        expected_cols = len(columns)
         
         if filename.endswith('.xlsx'):
-            df = pd.read_excel(BytesIO(response.content))
-            if len(df.columns) == len(columns):
+            df = pd.read_excel(BytesIO(response.content), header=None)
+            if len(df.columns) != expected_cols:
+                print(f"Warning: {filename} has {len(df.columns)} columns, expected {expected_cols}")
+                df = pd.read_excel(BytesIO(response.content))
+            if len(df.columns) == expected_cols:
                 df.columns = columns
+                
+        elif filename.endswith('.txt'):
+            # Print first few lines to debug
+            content = StringIO(response.text)
+            first_lines = [next(content) for _ in range(5)]
+            print(f"\nFirst few lines of {filename}:")
+            for line in first_lines:
+                print(line.strip())
             
+            # Reset content
+            content = StringIO(response.text)
+            
+            # Try fixed width first
+            df = pd.read_fwf(content, header=None)
+            
+            if len(df.columns) != expected_cols:
+                # If fixed width fails, try delimiters
+                content = StringIO(response.text)
+                for delimiter in [',', '\t', '|', ';']:
+                    try:
+                        df = pd.read_csv(content, delimiter=delimiter, header=None)
+                        if len(df.columns) == expected_cols:
+                            break
+                        content = StringIO(response.text)  # Reset for next try
+                    except:
+                        continue
+            
+            if len(df.columns) == expected_cols:
+                df.columns = columns
+            else:
+                print(f"\nWarning: {filename} column count mismatch:")
+                print(f"Found {len(df.columns)} columns: {df.columns.tolist()}")
+                print(f"Expected {expected_cols} columns: {columns}")
+                return None
+                    
         elif filename.endswith('.csv'):
-            # Try different delimiters
             for delimiter in [',', '\t', '|', ';']:
                 try:
-                    df = pd.read_csv(StringIO(response.text), delimiter=delimiter)
-                    if len(df.columns) == len(columns):
+                    df = pd.read_csv(StringIO(response.text), delimiter=delimiter, header=None)
+                    if len(df.columns) == expected_cols:
                         df.columns = columns
-                    break
+                        break
                 except:
                     continue
             else:
                 raise ValueError(f"Could not determine delimiter for {filename}")
-                
-        elif filename.endswith('.txt'):
-            # Try different delimiters for txt files
-            for delimiter in [',', '\t', '|', ';']:
-                try:
-                    df = pd.read_csv(StringIO(response.text), delimiter=delimiter)
-                    if len(df.columns) == len(columns):
-                        df.columns = columns
-                    break
-                except:
-                    continue
-            else:
-                # If all delimiter attempts fail, try fixed width
-                df = pd.read_fwf(StringIO(response.text))
-                if len(df.columns) == len(columns):
-                    df.columns = columns
 
         # Apply dictionary mappings
-        if df is not None:
+        if df is not None and len(df.columns) == expected_cols:
             df = process_codes(df, is_registration)
-            
-        return df
+            return df
+        else:
+            print(f"Error: Could not properly read {filename}. Found {len(df.columns)} columns, expected {expected_cols}")
+            return None
 
     except Exception as e:
         print(f"Error reading {filename}: {str(e)}")
