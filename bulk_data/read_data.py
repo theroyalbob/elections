@@ -149,15 +149,26 @@ def read_file_content(response, filename):
             print(f"\n{filename} dimensions: {df.shape}")
                 
         elif filename.endswith('.txt'):
+            # Try to decode with different encodings
+            for encoding in ['utf-8', 'latin1', 'cp1252']:
+                try:
+                    response_text = response.content.decode(encoding)
+                    break
+                except UnicodeDecodeError:
+                    continue
+            else:
+                print(f"Could not decode {filename} with any supported encoding")
+                return None
+            
             # Print first few lines to debug
-            content = StringIO(response.text)
+            content = StringIO(response_text)
             first_lines = [next(content) for _ in range(5)]
             print(f"\nFirst few lines of {filename}:")
             for line in first_lines:
                 print(line.strip())
             
             # Reset content
-            content = StringIO(response.text)
+            content = StringIO(response_text)
             
             # Try different delimiters and keep track of results
             best_df = None
@@ -166,7 +177,7 @@ def read_file_content(response, filename):
             # Special case for 2003 primary voter registration which is tab-separated
             if '2003' in filename and 'primary' in filename.lower() and 'registration' in filename.lower():
                 try:
-                    df = pd.read_csv(StringIO(response.text), delimiter='\t', header=None)
+                    df = pd.read_csv(StringIO(response_text), delimiter='\t', header=None, encoding=encoding)
                     print(f"\n{filename} dimensions with tab delimiter: {df.shape}")
                     return df
                 except Exception as e:
@@ -176,8 +187,8 @@ def read_file_content(response, filename):
             delimiters = [',', '\t', '|', ';']  # Ensure comma is included
             for delimiter in delimiters:
                 try:
-                    content = StringIO(response.text)
-                    df = pd.read_csv(content, delimiter=delimiter, header=None)
+                    content = StringIO(response_text)
+                    df = pd.read_csv(content, delimiter=delimiter, header=None, encoding=encoding)
                     print(f"{filename} dimensions with delimiter '{delimiter}': {df.shape}")
                     
                     # Keep track of the parsing that gives us the most columns
@@ -190,8 +201,8 @@ def read_file_content(response, filename):
             # If no delimiter worked well, try fixed width as last resort
             if best_cols == 1:
                 try:
-                    content = StringIO(response.text)
-                    df = pd.read_fwf(content, header=None)
+                    content = StringIO(response_text)
+                    df = pd.read_fwf(content, header=None, encoding=encoding)
                     print(f"\n{filename} dimensions with fixed width: {df.shape}")
                     if df.shape[1] > best_cols:
                         best_df = df
@@ -201,9 +212,20 @@ def read_file_content(response, filename):
             return best_df if best_df is not None else None
                     
         elif filename.endswith('.csv'):
+            # Try to decode with different encodings
+            for encoding in ['utf-8', 'latin1', 'cp1252']:
+                try:
+                    response_text = response.content.decode(encoding)
+                    break
+                except UnicodeDecodeError:
+                    continue
+            else:
+                print(f"Could not decode {filename} with any supported encoding")
+                return None
+                
             for delimiter in [',', '\t', '|', ';']:
                 try:
-                    df = pd.read_csv(StringIO(response.text), delimiter=delimiter, header=None)
+                    df = pd.read_csv(StringIO(response_text), delimiter=delimiter, header=None, encoding=encoding)
                     print(f"\n{filename} dimensions with delimiter '{delimiter}': {df.shape}")
                     break
                 except:
@@ -252,28 +274,71 @@ def parse_filename(filename):
             
     return year, election_type
 
+def clean_column_name(col_name):
+    """Clean column names to ensure they are valid for parquet"""
+    if not isinstance(col_name, str):
+        return f'col_{col_name}'
+    
+    # Replace problematic characters
+    cleaned = str(col_name).strip()
+    cleaned = ''.join(c if c.isalnum() or c in ['_', '-'] else '_' for c in cleaned)
+    
+    # Ensure it starts with a letter or underscore
+    if cleaned and not (cleaned[0].isalpha() or cleaned[0] == '_'):
+        cleaned = 'col_' + cleaned
+        
+    # If empty or None, generate a default name
+    if not cleaned:
+        cleaned = 'unnamed_column'
+        
+    return cleaned
+
 def save_data(data, base_dir, year, election_type, filename):
     """Save data to appropriate directory as parquet"""
     if data is None:
         return
     
-    # Generate column names if they are not strings
-    if not all(isinstance(col, str) for col in data.columns):
-        data.columns = generate_column_names(data.shape[1])
-    
-    directory = f"{base_dir}/{year}"
-    os.makedirs(directory, exist_ok=True)
-    
-    # Create parquet filename by replacing the original extension
-    parquet_filename = os.path.splitext(filename)[0] + '.parquet'
-    output_path = f"{directory}/{election_type}_{parquet_filename}"
-    
-    if not os.path.exists(output_path):
-        try:
-            data.to_parquet(output_path, index=False)
-            print(f"Saved {output_path}")
-        except Exception as e:
-            print(f"Error saving {output_path}: {str(e)}")
+    try:
+        # Ensure we have a proper DataFrame
+        if not isinstance(data, pd.DataFrame):
+            print(f"Error: Data for {filename} is not a DataFrame")
+            return
+            
+        # Clean column names
+        data.columns = [clean_column_name(col) for col in data.columns]
+        
+        # Convert all object columns to string and handle encoding issues
+        for col in data.columns:
+            if data[col].dtype == 'object':
+                # Convert to string and handle encoding issues
+                data[col] = data[col].apply(lambda x: str(x).encode('utf-8', errors='ignore').decode('utf-8') if x is not None else '')
+        
+        # Create directory structure
+        directory = f"{base_dir}/{year}"
+        os.makedirs(directory, exist_ok=True)
+        
+        # Create parquet filename
+        parquet_filename = os.path.splitext(filename)[0] + '.parquet'
+        output_path = f"{directory}/{election_type}_{parquet_filename}"
+        
+        if not os.path.exists(output_path):
+            try:
+                # Save using pyarrow engine explicitly
+                data.to_parquet(output_path, engine='pyarrow', index=False)
+                
+                # Verify the file was written correctly
+                try:
+                    pd.read_parquet(output_path)
+                    print(f"Successfully saved and verified {output_path}")
+                except Exception as e:
+                    print(f"Warning: File was saved but verification failed for {output_path}: {str(e)}")
+                    
+            except Exception as e:
+                print(f"Error saving {output_path}: {str(e)}")
+                
+    except Exception as e:
+        print(f"Error processing data for {filename}: {str(e)}")
+        return
 
 def process_links(linklist, base_dir):
     """Process list of links and save data"""
@@ -310,9 +375,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-
-
-
-
